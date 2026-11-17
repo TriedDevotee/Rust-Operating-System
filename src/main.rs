@@ -1,8 +1,11 @@
 #![no_std]
 #![no_main]
 
-use core::{panic::PanicInfo, ptr::read};
+extern crate alloc
 
+use core::{panic::PanicInfo, ptr::read};
+use alloc::{boxed::Box, vec::Vec};
+use linked_list_allocator::LockedHeap;
 use bootloader::BootInfo;
 
 #[panic_handler]
@@ -10,16 +13,28 @@ fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
 
+
+#[global_allocator]
+static ALLOCAOTR: LockedHeap = LockedHeap::empty();
+
+const HEAP_SIZE: usize = 4 * 1024 * 1024;
+static mut HEAP: [u8; HEAP_SIZE] = [0, HEAP_SIZE];
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(_boot_info: &'static mut bootloader::BootInfo) -> ! {
 
-    /* set_mode_13h();
+    set_mode_13h();
 
-    for index_y in 0..100 {
-        for index_x in 0..100 {
-            put_pixel(index_x, index_y, 15);
+    for i in 0..=255 {
+
+        set_palette_entry(i,i,i,0);
+    }
+
+    for y in 0..200 {
+        for x in 0..320 {
+            put_pixel(x, y, x as u8);
         }
-    } */
+    }
 
 
     loop{
@@ -35,7 +50,8 @@ pub extern "C" fn _start(_boot_info: &'static mut bootloader::BootInfo) -> ! {
 
             if character == '\x08' {
                 backspace_key();
-            } else if character != '?' {
+            } 
+            else if character != '?' {
                 vga_put(character);
             }
         }
@@ -59,6 +75,12 @@ unsafe fn outb(port : u16, val : u8){
     }
 }
 
+fn init_heap() {
+    unsafe {
+        ALLOCATOR.lock().init(&raw mut HEAP as *mut u8, HEAP_SIZE);
+    }
+}
+
 fn keyboard_has_data() -> bool {
     unsafe{
         let port = inb(0x64);
@@ -69,7 +91,9 @@ fn keyboard_has_data() -> bool {
 fn read_scancode() -> u8 {
     loop{
         if keyboard_has_data(){
-            return unsafe { inb(0x60) }
+            return unsafe { 
+                inb(0x60) 
+            }
         }
     }
 }
@@ -164,59 +188,69 @@ fn backspace_key(){
 
 fn set_mode_13h() {
     unsafe {
-        let crtc11 = inb(0x3D5);
-        outb(0x3D4, 0x11);
-        outb(0x3D5, crtc11 & 0x7F);
-
-        outb(0x3C2, 0x63);
-
         let seq_regs: [u8; 5] = [0x03, 0x01, 0x0F, 0x00, 0x0E];
-        for (i, &val) in seq_regs.iter().enumerate() {
-            outb(0x3C4, i as u8);
-            outb(0x3C5, val);
-        }
-
         let crtc_regs: [u8; 25] = [
             0x5F, 0x4F, 0x50, 0x82, 0x55,
-            0x81, 0x8F, 0x1F, 0x00, 0x4F,
-            0x0D, 0x0E, 0x00, 0x00, 0x00,
-            0x9C, 0x0E, 0x8F, 0x28, 0x40,
-            0x96, 0xB9, 0xA3, 0xFF, 0x00,
+            0x81, 0x8F, 0x1F, 0x00, 0x41,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x9F, 0x0E, 0x8F, 0x28,
+            0x40, 0x96, 0xB9, 0xA3, 0xFF,
         ];
-        for (i, &val) in crtc_regs.iter().enumerate() {
-            outb(0x3D4, i as u8);
-            outb(0x3D5, val);
-        }
-
         let gc_regs: [u8; 9] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F, 0xFF];
-        for (i, &val) in gc_regs.iter().enumerate() {
-            outb(0x3CE, i as u8);
-            outb(0x3CF, val);
-        }
-
         let ac_regs: [u8; 21] = [
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
             0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
             0x41, 0x00, 0x0F, 0x00, 0x00,
         ];
-        for (i, &val) in ac_regs.iter().enumerate() {
-            let _ = inb(0x3DA); 
-            outb(0x3C0, i as u8);
-            outb(0x3C0, val);
+
+        outb(0x3C2, 0x63);
+
+        for (i, &v) in seq_regs.iter().enumerate() { 
+            outb(0x3C4, i as u8); 
+            outb(0x3C5, v); 
         }
 
-        let vga_buffer = 0xA0000 as *mut u8;
-        for i in 0..(320 * 200) {
-            *vga_buffer.offset(i) = 15; 
+        outb(0x3D4, 0x11);
+        let v = inb(0x3D5);
+        outb(0x3D5, v & 0x7F);
+
+        for (i, &v) in crtc_regs.iter().enumerate() {
+            outb(0x3D4, i as u8);
+            outb(0x3D5, v);
         }
+
+        for (i, &v) in gc_regs.iter().enumerate() {
+            outb(0x3CE, i as u8);
+            outb(0x3CF, v);
+        }
+
+        for (i, &v) in ac_regs.iter().enumerate() {
+            let _ = inb(0x3DA);
+            outb(0x3C0, i as u8);
+            outb(0x3C0, v);
+        }
+
+        let _ = inb(0x3DA);
+        outb(0x3C0, 0x20);
     }
 }
 
-fn put_pixel(x: i32, y: i32, color: u8) {
-    if x < 0 || x >= 320 || y < 0 || y >= 200 { return; }
-    let offset = y * 320 + x;
-    let vga_buffer = 0xA0000 as *mut u8;
+fn set_palette_entry(i: u8, r: u8, g: u8, b: u8) {
     unsafe {
-        *vga_buffer.offset(offset as isize) = color;
+        outb(0x3C8, i);
+        outb(0x3C9, r >> 2);
+        outb(0x3C9, g >> 2);
+        outb(0x3C9, b >> 2);
+    }
+}
+
+fn put_pixel(x: usize, y: usize, color: u8) {
+    if x >= 320 || y >= 200 { 
+        return;
+    }
+
+    let vga = 0xA0000 as *mut u8;
+    unsafe { 
+        *vga.add(y * 320 + x) = color; 
     }
 }
