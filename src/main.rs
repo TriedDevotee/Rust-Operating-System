@@ -30,48 +30,29 @@ pub extern "C" fn _start(_boot_info: &'static mut bootloader::BootInfo) -> ! {
     init_timer();
     set_mode_13h();
 
-    let mut v: Vec<u8> = Vec::new();
-    for i in 0..320 {
-        v.push((i / 5) as u8);
+        set_palette_entry(0, 0, 0, 24);          // night sky
+    set_palette_entry(2, 20, 90, 30);        // wire
+    set_palette_entry(3, 255, 255, 255);     // snow
+
+    // background
+    for y in 0..200 { for x in 0..320 { put_pixel(x, y, 0); } }
+
+    // snow: 90 pseudo-random specks
+    for i in 0..90u64 {
+        let h = hash(i);
+        put_pixel((h % 320) as usize, ((h >> 16) % 200) as usize, 3);
     }
 
-    let b = Box::new(200u8);
-    for i in 0..100 {
-        let big: Vec<u8> = alloc::vec![0u8; 1024 * 1024];
-        core::hint::black_box(&big);
-    }
+    draw_strand(8, 0, 0);
+    draw_strand(68, 40, 3);
+    draw_strand(128, 0, 5);
 
-    for i in 0..64u8 {
-        set_palette_entry(i, i << 2, i << 2, i << 2);
-    }
-    set_palette_entry(200, 255, 0, 0);
-
-    for y in 0..200 {
-        for x in 0..320 {
-            put_pixel(x, y, v[x]);
-        }
-    }
-
-    let mut on = false;
-    let mut next = 1000;
-
-    loop{
-        if ticks_ms() >= next {
-            next += 1000;
-            on = !on;
-            let mut color = 1;
-            if on {
-                color = 200;
-            }
-            else {
-                color = 100;
-            }
-
-            for y in 0..200 {
-                for x in 0..320 {
-                    put_pixel(x, y, color);
-                }
-            }
+    let mut last_frame = 0;
+    loop {
+        let t = ticks_ms();
+        if t - last_frame >= 25 {
+            last_frame = t;
+            update_lights(t);
         }
     }
 }
@@ -309,5 +290,80 @@ fn sleep_ms(ms: u64) {
     let target = ticks_ms() + ms;
     while ticks_ms() < target {
         //Again this just stalls the thread until ms has passed
+    }
+}
+
+const COLOURS: [(u8, u8, u8); 8] = [
+    (255, 0, 0), (0, 255, 0), (0, 120, 255), (255, 200, 0),
+    (255, 0, 160), (255, 255, 255), (0, 255, 220), (255, 110, 0),
+];
+
+fn put_pixel_i(x: i32, y: i32, c: u8) {
+    if x < 0 || y < 0 { return; }
+    put_pixel(x as usize, y as usize, c);
+}
+
+fn fill_circle(cx: i32, cy: i32, r: i32, c: u8) {
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                put_pixel_i(cx + dx, cy + dy, c);
+            }
+        }
+    }
+}
+
+// A drooping curve: repeats every 80 px, sags 32 px in the middle
+fn wire_y(x: i32, base: i32) -> i32 {
+    let u = (x % 80) - 40;
+    base + (1600 - u * u) / 50
+}
+
+fn draw_strand(base: i32, xoff: i32, ch_off: i32) {
+    for x in 0..320 {
+        let y = wire_y(x + xoff, base);
+        put_pixel_i(x, y, 2);
+        put_pixel_i(x, y + 1, 2);
+    }
+    for n in 0..20 {
+        let x = 8 + 16 * n;
+        let y = wire_y(x + xoff, base);
+        for s in 1..4 { put_pixel_i(x, y + s, 2); }   // little stem
+        let ch = (n + ch_off) % 8;                    // which palette channel
+        fill_circle(x, y + 7, 4, 16 + ch as u8);
+    }
+}
+
+// Triangle wave: 0 -> 255 -> 0 over `period` milliseconds
+fn tri(t: u64, period: u64) -> u64 {
+    let p = t % period;
+    let half = period / 2;
+    let v = if p < half { p } else { period - p };
+    v * 255 / half
+}
+
+// Cheap scrambler so "random" values are the same every run
+fn hash(n: u64) -> u64 {
+    let mut x = n.wrapping_mul(0x9E3779B97F4A7C15);
+    x ^= x >> 32;
+    x = x.wrapping_mul(0xD6E8FEB86659FD93);
+    x ^ (x >> 32)
+}
+
+fn scale(c: u8, b: u64) -> u8 {
+    (c as u64 * b / 255) as u8
+}
+
+fn update_lights(t: u64) {
+    let mode = (t / 8000) % 3;                 // change pattern every 8 seconds
+    for k in 0..8u64 {
+        let level = match mode {
+            0 => tri(t + k * 100, 800),                          // wave rolls along
+            1 => if hash(t / 250 * 8 + k) & 3 == 0 { 255 } else { 0 },  // twinkle
+            _ => tri(t, 2000),                                   // all breathe together
+        };
+        let b = 50 + level * 205 / 255;        // never fully off: 50..255
+        let (r, g, bl) = COLOURS[k as usize];
+        set_palette_entry(16 + k as u8, scale(r, b), scale(g, b), scale(bl, b));
     }
 }
