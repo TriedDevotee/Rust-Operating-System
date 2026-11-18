@@ -4,10 +4,55 @@
 extern crate alloc;
 
 use core::{panic::PanicInfo, ptr::read};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 use alloc::{boxed::Box, vec::Vec};
 use linked_list_allocator::LockedHeap;
 use bootloader::BootInfo;
+use spin::Mutex;
+
+#[derive(Clone, Copy)]
+struct KeyEvent {
+    pressed : bool,
+    extended : bool,
+    code : u8,
+}
+
+const queueLength : usize = 64;
+
+struct KeyQueue {
+    buffer : [Option<KeyEvent>; queueLength],
+    head : usize,
+    tail : usize,
+}
+
+impl KeyQueue {
+    const fn new() -> Self {
+        return KeyQueue {
+            buffer : [None; queueLength], head : 0, tail : 0 
+        }
+    }
+
+    fn push(&mut self, newEvent : KeyEvent) {
+        let next = (self.tail + 1) % queueLength;
+
+        if next != self.head {
+            self.buffer[self.tail] = Some(newEvent);
+            self.tail = next;
+        }
+    }
+
+    fn pop(&mut self) -> Option<KeyEvent> {
+        if self.head == self.tail {
+            return None;
+        }
+
+        let keyEvent = self.buffer[self.head].take();
+
+        self.head = (self.head + 1) % queueLength;
+
+        return keyEvent;
+    }
+}
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -24,54 +69,50 @@ static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 const HEAP_SIZE: usize = 4 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
+static KEYS: Mutex<KeyQueue> = Mutex::new(KeyQueue::new());
+static EXTENDED : AtomicBool = AtomicBool::new(false);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(_boot_info: &'static mut bootloader::BootInfo) -> ! {
     init_heap();
     init_timer();
     set_mode_13h();
 
-    let mut v: Vec<u8> = Vec::new();
-    for i in 0..320 {
-        v.push((i / 5) as u8);
-    }
-
-    let b = Box::new(200u8);
-    for i in 0..100 {
-        let big: Vec<u8> = alloc::vec![0u8; 1024 * 1024];
-        core::hint::black_box(&big);
-    }
-
-    for i in 0..64u8 {
-        set_palette_entry(i, i << 2, i << 2, i << 2);
-    }
+    set_palette_entry(0, 0, 0, 0);
+    set_palette_entry(15, 255, 255, 255);
     set_palette_entry(200, 255, 0, 0);
 
-    for y in 0..200 {
-        for x in 0..320 {
-            put_pixel(x, y, v[x]);
+    for y in 0..200 { for x in 0..320 { put_pixel(x, y, 0); } }
+
+    let (mut x, mut y) = (150i32, 90i32);
+    let (mut up, mut down, mut left, mut right, mut fire) = (false, false, false, false, false);
+    let mut last = 0;
+
+    loop {
+        poll_keyboard();
+
+        while let Some(ev) = pop_keys() {
+            match (ev.extended, ev.code) {
+                (true, 0x48) => up = ev.pressed,
+                (true, 0x50) => down = ev.pressed,
+                (true, 0x4B) => left = ev.pressed,
+                (true, 0x4D) => right = ev.pressed,
+                (_, 0x1D)    => fire = ev.pressed,    // either Ctrl
+                _ => {}
+            }
         }
-    }
 
-    let mut on = false;
-    let mut next = 1000;
-
-    loop{
-        if ticks_ms() >= next {
-            next += 1000;
-            on = !on;
-            let mut color = 1;
-            if on {
-                color = 200;
-            }
-            else {
-                color = 100;
-            }
-
-            for y in 0..200 {
-                for x in 0..320 {
-                    put_pixel(x, y, color);
-                }
-            }
+        let t = ticks_ms();
+        if t - last >= 16 {
+            last = t;
+            fill_rect(x, y, 10, 10, 0);               // erase
+            if up    { y -= 2; }
+            if down  { y += 2; }
+            if left  { x -= 2; }
+            if right { x += 2; }
+            x = x.clamp(0, 310);
+            y = y.clamp(0, 190);
+            fill_rect(x, y, 10, 10, if fire { 15 } else { 200 });
         }
     }
 }
@@ -309,5 +350,38 @@ fn sleep_ms(ms: u64) {
     let target = ticks_ms() + ms;
     while ticks_ms() < target {
         //Again this just stalls the thread until ms has passed
+    }
+}
+
+fn poll_keyboard() {
+    unsafe {
+        while keyboard_has_data() {
+            let byte = inb(0x60);
+
+            if byte == 0xE0 {
+                EXTENDED.store(true, Ordering::Relaxed);
+                continue;
+            }
+
+            let extended = EXTENDED.swap(false, Ordering::Relaxed);
+
+            KEYS.lock().push(KeyEvent {
+                pressed : byte & 0x80 == 0,
+                extended : extended,
+                code : byte & 0x7F 
+            });
+        }
+    }
+}
+
+fn pop_keys() -> Option<KeyEvent> {
+    return KEYS.lock().pop();
+}
+
+fn fill_rect(x: i32, y: i32, w: i32, h: i32, c: u8) {
+    for dy in 0..h {
+        for dx in 0..w {
+            put_pixel((x + dx) as usize, (y + dy) as usize, c);
+        }
     }
 }
