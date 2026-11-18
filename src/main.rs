@@ -1,9 +1,10 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc
+extern crate alloc;
 
 use core::{panic::PanicInfo, ptr::read};
+use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::{boxed::Box, vec::Vec};
 use linked_list_allocator::LockedHeap;
 use bootloader::BootInfo;
@@ -15,44 +16,61 @@ fn panic(_info: &PanicInfo) -> ! {
 
 
 #[global_allocator]
-static ALLOCAOTR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: LockedHeap = LockedHeap::empty();
+
+static TSC_PER_MS: AtomicU64 = AtomicU64::new(1);
+static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 
 const HEAP_SIZE: usize = 4 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0, HEAP_SIZE];
+static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(_boot_info: &'static mut bootloader::BootInfo) -> ! {
-
+    init_heap();
+    init_timer();
     set_mode_13h();
 
-    for i in 0..=255 {
-
-        set_palette_entry(i,i,i,0);
+    let mut v: Vec<u8> = Vec::new();
+    for i in 0..320 {
+        v.push((i / 5) as u8);
     }
+
+    let b = Box::new(200u8);
+    for i in 0..100 {
+        let big: Vec<u8> = alloc::vec![0u8; 1024 * 1024];
+        core::hint::black_box(&big);
+    }
+
+    for i in 0..64u8 {
+        set_palette_entry(i, i << 2, i << 2, i << 2);
+    }
+    set_palette_entry(200, 255, 0, 0);
 
     for y in 0..200 {
         for x in 0..320 {
-            put_pixel(x, y, x as u8);
+            put_pixel(x, y, v[x]);
         }
     }
 
+    let mut on = false;
+    let mut next = 1000;
 
     loop{
-        if keyboard_has_data() {
-            let code : u8 = read_scancode();
-            let mut character = '?';
-
-            if code < 0x80 {
-                if let Some(c) = scancode_to_char(code) {
-                    character = c;
-                }
+        if ticks_ms() >= next {
+            next += 1000;
+            on = !on;
+            let mut color = 1;
+            if on {
+                color = 200;
+            }
+            else {
+                color = 100;
             }
 
-            if character == '\x08' {
-                backspace_key();
-            } 
-            else if character != '?' {
-                vga_put(character);
+            for y in 0..200 {
+                for x in 0..320 {
+                    put_pixel(x, y, color);
+                }
             }
         }
     }
@@ -190,10 +208,10 @@ fn set_mode_13h() {
     unsafe {
         let seq_regs: [u8; 5] = [0x03, 0x01, 0x0F, 0x00, 0x0E];
         let crtc_regs: [u8; 25] = [
-            0x5F, 0x4F, 0x50, 0x82, 0x55,
-            0x81, 0x8F, 0x1F, 0x00, 0x41,
+            0x5F, 0x4F, 0x50, 0x82, 0x54,
+            0x80, 0xBF, 0x1F, 0x00, 0x41,
             0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x9F, 0x0E, 0x8F, 0x28,
+            0x00, 0x9C, 0x0E, 0x8F, 0x28,
             0x40, 0x96, 0xB9, 0xA3, 0xFF,
         ];
         let gc_regs: [u8; 9] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F, 0xFF];
@@ -252,5 +270,44 @@ fn put_pixel(x: usize, y: usize, color: u8) {
     let vga = 0xA0000 as *mut u8;
     unsafe { 
         *vga.add(y * 320 + x) = color; 
+    }
+}
+
+fn rdtsc() -> u64 {
+    unsafe {
+        return core::arch::x86_64::_rdtsc();
+    }
+}
+
+fn init_timer() {
+    unsafe {
+        let v = inb(0x61);
+        outb(0x61, (v & !0x02) | 0x01);
+
+        outb(0x43, 0xB0);
+
+        let count: u16 = 59659; //Thats the max value and then it counts down
+        outb(0x42, (count & 0xFF) as u8);
+        outb(0x42, (count >> 8) as u8);
+
+        let start = rdtsc();
+        while inb(0x61) & 0x20 == 0 {
+            //This does nothing just counting, its pretty cool ngl
+        }
+        let end = rdtsc();
+
+        TSC_PER_MS.store((end - start) / 50, Ordering::Relaxed)
+    }
+}
+
+fn ticks_ms() -> u64 {
+    let elapsed = rdtsc() - BOOT_TSC.load(Ordering::Relaxed);
+    return elapsed / TSC_PER_MS.load(Ordering::Relaxed);
+}
+
+fn sleep_ms(ms: u64) {
+    let target = ticks_ms() + ms;
+    while ticks_ms() < target {
+        //Again this just stalls the thread until ms has passed
     }
 }
