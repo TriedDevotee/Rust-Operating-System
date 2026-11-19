@@ -328,7 +328,7 @@ static mut WAD_F: KFile = KFile {
     data: ptr::null(),
     len: 0,
     pos: 0
-}
+};
 
 #[unsafe(no_mangle)]
 pub static mut stdin: *mut KFile = &raw mut STDIN_F;
@@ -362,7 +362,7 @@ pub unsafe extern "C" fn fopen(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fclose(_path: *const u8, _mode: *const u8) -> i32 {
+pub extern "C" fn fclose(_stream: *mut KFile) -> i32 {
     return 0;
 }
 
@@ -422,18 +422,86 @@ pub extern "C" fn fflush() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fread() -> i32 {
-    return 0;
+pub unsafe extern "C" fn fread(buffer: *mut u8, size: usize, count: usize, stream: *mut KFile) -> usize {
+    if buffer.is_null() || stream.is_null() {
+        return 0;
+    }
+
+    if size == 0 || count == 0 {
+        return 0;
+    }
+
+    let total = match size.checked_mul(count) {
+        Some(n) => n,
+        None => return 0,
+    };
+
+    unsafe {
+        if (*stream).kind != 3 {
+            return 0;
+        }
+
+        let available = (*stream).len.saturating_sub((*stream).pos);
+        let bytes = total.min(available);
+
+        ptr::copy_nonoverlapping(
+            (*stream).data.add((*stream).pos),
+            buffer,
+            bytes
+        );
+
+        (*stream).pos += bytes;
+
+        return bytes / size;
+    }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fseek() -> i32 {
-    return -1;
+pub unsafe extern "C" fn fseek(stream: *mut KFile, offset: i64, whence: i32) -> i32 {
+    if stream.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        if (*stream).kind != 3 {
+            return -1;
+        }
+
+        let base = match whence {
+            0 => 0i128,                 // SEEK_SET
+            1 => (*stream).pos as i128,  // SEEK_CUR
+            2 => (*stream).len as i128, // SEEK_END
+            _ => return -1,
+        };
+
+        let new_pos = base + offset as i128;
+
+        if new_pos < 0 || new_pos > usize::MAX as i128 {
+            return -1;
+        }
+
+        (*stream).pos = new_pos as usize;
+        return 0;
+    }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ftell() -> i32 {
-    return -1;
+pub unsafe extern "C" fn ftell(stream: *mut KFile) -> i64 {
+    if stream.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        if (*stream).kind != 3 {
+            return -1;
+        }
+
+        if (*stream).pos > i64::MAX as usize {
+            return -1;
+        }
+
+        return (*stream).pos as i64;
+    }
 }
 
 
@@ -463,7 +531,7 @@ pub unsafe extern "C" fn fwrite(pointer: *const u8, size: usize, count: usize, s
         }
     }
 
-    count
+    return count;
 }
 
 #[unsafe(no_mangle)]
