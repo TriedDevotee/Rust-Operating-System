@@ -38,4 +38,5 @@ fn main() {
 
     println!("cargoLrerun-if-changed=doom");
     println!("cargo:rerun-if-changed=libc");
+    println!("cargo:rustc-link-arg=--error-limit=0");
 }

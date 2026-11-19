@@ -21,3 +21,6 @@ bench = false
 
 [build-dependencies]
 cc = "1"
+
+[package.metadata.bootimage]
+run-args = ["-serial", "stdio"]

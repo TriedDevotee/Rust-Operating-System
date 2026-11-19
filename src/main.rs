@@ -10,6 +10,8 @@ use linked_list_allocator::LockedHeap;
 use bootloader::BootInfo;
 use spin::Mutex;
 
+mod libc;
+
 #[derive(Clone, Copy)]
 struct KeyEvent {
     pressed : bool,
@@ -66,7 +68,7 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 static TSC_PER_MS: AtomicU64 = AtomicU64::new(1);
 static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 
-const HEAP_SIZE: usize = 4 * 1024 * 1024;
+const HEAP_SIZE: usize = 16 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 static KEYS: Mutex<KeyQueue> = Mutex::new(KeyQueue::new());
@@ -75,47 +77,58 @@ static EXTENDED : AtomicBool = AtomicBool::new(false);
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(_boot_info: &'static mut bootloader::BootInfo) -> ! {
     init_heap();
+    libc::serial_init();
     init_timer();
     set_mode_13h();
 
-    set_palette_entry(0, 0, 0, 0);
-    set_palette_entry(15, 255, 255, 255);
-    set_palette_entry(200, 255, 0, 0);
+    static ARG0: [u8; 5] = *b"doom\0";
+    let mut argv: [*mut u8; 2] = [ARG0.as_ptr() as *mut u8, core::ptr::null_mut()];
 
-    for y in 0..200 { for x in 0..320 { put_pixel(x, y, 0); } }
-
-    let (mut x, mut y) = (150i32, 90i32);
-    let (mut up, mut down, mut left, mut right, mut fire) = (false, false, false, false, false);
-    let mut last = 0;
-
-    loop {
-        poll_keyboard();
-
-        while let Some(ev) = pop_keys() {
-            match (ev.extended, ev.code) {
-                (true, 0x48) => up = ev.pressed,
-                (true, 0x50) => down = ev.pressed,
-                (true, 0x4B) => left = ev.pressed,
-                (true, 0x4D) => right = ev.pressed,
-                (_, 0x1D)    => fire = ev.pressed,    // either Ctrl
-                _ => {}
-            }
-        }
-
-        let t = ticks_ms();
-        if t - last >= 16 {
-            last = t;
-            fill_rect(x, y, 10, 10, 0);               // erase
-            if up    { y -= 2; }
-            if down  { y += 2; }
-            if left  { x -= 2; }
-            if right { x += 2; }
-            x = x.clamp(0, 310);
-            y = y.clamp(0, 190);
-            fill_rect(x, y, 10, 10, if fire { 15 } else { 200 });
+    unsafe {
+        doomgeneric_Create(1, argv.as_mut_ptr());
+        loop {
+            doomgeneric_Tick();
         }
     }
 }
+
+unsafe extern "C" {
+    fn doomgeneric_Create(argc: i32, argv: *mut *mut u8);
+    fn doomgeneric_Tick();
+    static mut DG_ScreenBuffer: *mut u8;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DG_Init() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DG_DrawFrame() {
+    unsafe {
+        core::ptr::copy_nonoverlapping(DG_ScreenBuffer, 0xA0000 as *mut u8, 320 * 200);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DG_SleepMs(ms: u32) {
+    sleep_ms(ms.into());
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DG_GetTicksMs() -> u32 {
+    return ticks_ms() as u32; //returns u64 GOD IM SO GOOD AT THIS
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DG_GetKey() -> u32 {
+    return 0;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DG_SetWindowTitle(_title: *const u8) {
+    //I wouldnt have the foggiest on how to do that so we're just hoping its not important :)
+}
+
+
 
 static mut ROW : i32 = 0;
 static mut COL : i32 = 0;
@@ -178,71 +191,6 @@ fn scancode_to_char(code : u8) -> Option<char>{
     }
 
     SCANCODE_MAP[code as usize]
-}
-
-fn set_cursor_position(pos : u16){
-
-    unsafe {
-        outb(0x3D4, 0x0E);
-        outb(0x3D5, (pos >> 8) as u8);
-        outb(0x3D4, 0x0F);
-        outb(0x3D5, (pos & 0xFF) as u8);
-    }
-}
-
-fn get_cursor_position() -> u16 {
-    unsafe{
-        outb(0x3D4, 0x0E);
-        let high = inb(0x3D5);
-        outb(0x3D4, 0x0F);
-        let low = inb(0x3D5);
-
-        ((high as u16) << 8) | (low as u16)
-    }
-}
-
-fn move_cursor_left() {
-    let pos : u16 = get_cursor_position();
-    if pos > 0 {
-        set_cursor_position(pos - 1);
-    }
-}
-
-fn move_cursor_right() {
-    let pos : u16 = get_cursor_position();
-    if pos < 1999 {
-        set_cursor_position(pos + 1);
-    }
-}
-
-fn vga_put(c : char){
-
-    let pos  = get_cursor_position() as isize;
-    
-    let vga_buffer : *mut u8 = 0xb8000 as *mut u8;
-
-    unsafe {
-        *vga_buffer.offset(pos * 2) = c as u8;
-        *vga_buffer.offset(pos * 2 + 1) = 0xb;
-
-        move_cursor_right();
-        COL = COL % 80; 
-    }
-}
-
-fn backspace_key(){
-    let pos = get_cursor_position() as isize;
-    
-    let vga_buffer : *mut u8 = 0xb8000 as *mut u8;
-
-    unsafe {
-
-        move_cursor_left();
-        COL = COL % 80;
-
-        *vga_buffer.offset(pos * 2) = 0x20;
-        *vga_buffer.offset(pos * 2 + 1) = 0xb;
-    }
 }
 
 fn set_mode_13h() {
@@ -378,10 +326,3 @@ fn pop_keys() -> Option<KeyEvent> {
     return KEYS.lock().pop();
 }
 
-fn fill_rect(x: i32, y: i32, w: i32, h: i32, c: u8) {
-    for dy in 0..h {
-        for dx in 0..w {
-            put_pixel((x + dx) as usize, (y + dy) as usize, c);
-        }
-    }
-}
