@@ -1,6 +1,9 @@
 use alloc::alloc::{alloc as rust_alloc, dealloc as rust_dealloc, Layout};
 use core::ptr::{self, null_mut};
+use core::ffi::VaList;
 use crate::{inb, outb};
+
+static WAD_DATA : &[u8] = include_bytes!("../assets/DOOM1.WAD");
 
 pub fn serial_init() {
     unsafe{
@@ -243,7 +246,7 @@ pub unsafe extern "C" fn toupper(c : i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tolower(c : i32) -> i32 {
-    if (c >= 65 && c < 91){
+    if c >= 65 && c < 91{
         return c + 32;
     }
     return c;
@@ -294,11 +297,38 @@ pub static mut errno: i32 = 0;
 #[repr(C)]
 pub struct KFile {
     kind: i32,
+    data: *const u8,
+    len: usize,
+    pos: usize,
 }
 
-static mut STDIN_F: KFile = KFile { kind: 0 };
-static mut STDOUT_F: KFile = KFile {kind : 1};
-static mut STDERR_F: KFile = KFile { kind: 2 };
+static mut STDIN_F: KFile = KFile { 
+    kind: 0,
+    data: ptr::null(),
+    len: 0,
+    pos: 0
+};
+
+static mut STDOUT_F: KFile = KFile { 
+    kind: 1,
+    data: ptr::null(),
+    len: 0,
+    pos: 0
+};
+
+static mut STDERR_F: KFile = KFile { 
+    kind: 2,
+    data: ptr::null(),
+    len: 0,
+    pos: 0
+};
+
+static mut WAD_F: KFile = KFile {
+    kind: 3,
+    data: ptr::null(),
+    len: 0,
+    pos: 0
+}
 
 #[unsafe(no_mangle)]
 pub static mut stdin: *mut KFile = &raw mut STDIN_F;
@@ -310,8 +340,25 @@ pub static mut stdout: *mut KFile = &raw mut STDOUT_F;
 pub static mut stderr: *mut KFile = &raw mut STDERR_F;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fopen(_path: *const u8, _mode: *const u8) -> *mut KFile {
-    return null_mut();
+pub unsafe extern "C" fn fopen(
+    path: *const u8,
+    _mode: *const u8
+) -> *mut KFile {
+    if path.is_null() {
+        return null_mut();
+    }
+
+    unsafe {
+        if strcasecmp(path, b"DOOM1.WAD\0".as_ptr()) != 0 {
+            return null_mut();
+        }
+
+        WAD_F.data = WAD_DATA.as_ptr();
+        WAD_F.len = WAD_DATA.len();
+        WAD_F.pos = 0;
+
+        return &raw mut WAD_F;
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -340,22 +387,404 @@ pub unsafe extern "C" fn puts(s: *const u8) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn printf(fmt: *const u8) -> i32 {
-    unsafe { 
-        serial_puts(fmt); 
+pub extern "C" fn exit(code: i32) {
+    unsafe{
+        let message = alloc::format!("ERROR: {}", code);
+        serial_puts(message.as_ptr());
+        loop {}
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn system() -> i32 {
+    return -1;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn remove() -> i32 {
+    unsafe {
+        errno = 2;
+        return -1;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rename() -> i32 {
+    unsafe {
+        errno = 2;
+        return -1;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fflush() -> i32 {
     return 0;
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn snprintf(buffer: *mut u8, n: usize, fmt: *const u8) -> i32 {
-    unsafe {
-        let len = cstr_len(fmt);
-        if n > 0 {
-            let c = len.min(n - 1);
-            ptr::copy_nonoverlapping(fmt, buffer, c);
-            *buffer.add(c) = 0;
-        }
-        return (len as i32);
+pub extern "C" fn fread() -> i32 {
+    return 0;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fseek() -> i32 {
+    return -1;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ftell() -> i32 {
+    return -1;
+}
+
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fwrite(pointer: *const u8, size: usize, count: usize, stream: *mut KFile) -> usize {
+    if pointer.is_null() || stream.is_null() {
+        return 0;
     }
+
+    if size == 0 || count == 0 {
+        return 0;
+    }
+
+    let total = match size.checked_mul(count) {
+        Some(n) => n,
+        None => return 0,
+    };
+
+    unsafe {
+        match (*stream).kind {
+            1 | 2 => {
+                for i in 0..total {
+                    serial_write(*pointer.add(i));
+                }
+            }
+            _ => return 0,
+        }
+    }
+
+    count
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sscanf(_s: *const u8, _fmt: *const u8) -> i32 { 
+    return 0; 
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    let mut i = 0;
+    unsafe {
+        while i < n && *src.add(i) != 0 {
+            *dest.add(i) = *src.add(i);
+            i += 1;
+        }
+        while i < n {
+            *dest.add(i) = 0;
+            i += 1;
+        }
+    }
+    return dest;
+}
+
+//-----------NOTE TO READER THIS IS CLAUDES CODE I HAVE
+//-----------LITERALLY NO IDEA HOW THE FUCK THIS WORKS BUT I JUST NEED IT TO
+//-----------THIS WILL BE REWRITTEN AT A LATER DATE, I JUST WANT TO GET IT WORKING
+
+unsafe fn arg_i32(ap: &mut VaList<'_>) -> i32 { unsafe { ap.next_arg::<i32>() } }
+unsafe fn arg_i64(ap: &mut VaList<'_>) -> i64 { unsafe { ap.next_arg::<i64>() } }
+unsafe fn arg_ptr(ap: &mut VaList<'_>) -> *const u8 { unsafe { ap.next_arg::<*const u8>() } }
+
+// ---- output sink: counts every byte and forwards it ----
+struct Out<'a> {
+    f: &'a mut dyn FnMut(u8),
+    count: i32,
+}
+
+impl Out<'_> {
+    fn put(&mut self, b: u8) {
+        (self.f)(b);
+        self.count += 1;
+    }
+    fn pad(&mut self, ch: u8, n: usize) {
+        for _ in 0..n {
+            self.put(ch);
+        }
+    }
+}
+
+// ---- integer output: sign, prefix, zeros, digits, padding ----
+fn emit_int(
+    out: &mut Out<'_>,
+    mut mag: u64,
+    neg: bool,
+    base: u64,
+    upper: bool,
+    prefix: &[u8],
+    left: bool,
+    zero: bool,
+    width: usize,
+    prec: Option<usize>,
+) {
+    let mut digits = [0u8; 24];
+    let mut n = 0;
+
+    if mag == 0 && prec != Some(0) {
+        digits[0] = b'0';
+        n = 1;
+    }
+    while mag > 0 {
+        let d = (mag % base) as u8;
+        digits[n] = if d < 10 {
+            b'0' + d
+        } else if upper {
+            b'A' + d - 10
+        } else {
+            b'a' + d - 10
+        };
+        mag /= base;
+        n += 1;
+    }
+
+    let sign: &[u8] = if neg { b"-" } else { b"" };
+    let prec_zeros = prec.map_or(0, |p| p.saturating_sub(n));
+    let body = sign.len() + prefix.len() + prec_zeros + n;
+    let pad = width.saturating_sub(body);
+    let zero_pad = zero && !left && prec.is_none();   // '-' and a precision both cancel '0'
+
+    if !left && !zero_pad {
+        out.pad(b' ', pad);
+    }
+    for &b in sign {
+        out.put(b);
+    }
+    for &b in prefix {
+        out.put(b);
+    }
+    if zero_pad {
+        out.pad(b'0', pad);
+    }
+    out.pad(b'0', prec_zeros);
+    for i in (0..n).rev() {
+        out.put(digits[i]);
+    }
+    if left {
+        out.pad(b' ', pad);
+    }
+}
+
+// ---- the engine ----
+unsafe fn format(f: &mut dyn FnMut(u8), mut fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
+    let mut out = Out { f, count: 0 };
+
+    unsafe {
+        loop {
+            let c = *fmt;
+            if c == 0 {
+                break;
+            }
+            fmt = fmt.add(1);
+            if c != b'%' {
+                out.put(c);
+                continue;
+            }
+
+            // flags
+            let mut left = false;
+            let mut zero = false;
+            loop {
+                match *fmt {
+                    b'-' => left = true,
+                    b'0' => zero = true,
+                    b'+' | b' ' | b'#' => {}   // accepted, ignored
+                    _ => break,
+                }
+                fmt = fmt.add(1);
+            }
+
+            // width
+            let mut width = 0usize;
+            if *fmt == b'*' {
+                fmt = fmt.add(1);
+                let w = arg_i32(ap);
+                if w < 0 {
+                    left = true;
+                }
+                width = w.unsigned_abs() as usize;
+            } else {
+                while (*fmt).is_ascii_digit() {
+                    width = width * 10 + (*fmt - b'0') as usize;
+                    fmt = fmt.add(1);
+                }
+            }
+
+            // precision
+            let mut prec: Option<usize> = None;
+            if *fmt == b'.' {
+                fmt = fmt.add(1);
+                if *fmt == b'*' {
+                    fmt = fmt.add(1);
+                    let p = arg_i32(ap);
+                    if p >= 0 {
+                        prec = Some(p as usize);
+                    }
+                } else {
+                    let mut p = 0usize;
+                    while (*fmt).is_ascii_digit() {
+                        p = p * 10 + (*fmt - b'0') as usize;
+                        fmt = fmt.add(1);
+                    }
+                    prec = Some(p);
+                }
+            }
+
+            // length modifiers: l, ll, z, j, t are all 64-bit here; h and hh truncate
+            let mut long = false;
+            let mut hcount = 0u8;
+            loop {
+                match *fmt {
+                    b'l' | b'z' | b'j' | b't' => long = true,
+                    b'h' => hcount += 1,
+                    _ => break,
+                }
+                fmt = fmt.add(1);
+            }
+
+            // conversion
+            let conv = *fmt;
+            if conv == 0 {
+                break;   // a lone '%' at the very end
+            }
+            fmt = fmt.add(1);
+
+            match conv {
+                b'd' | b'i' => {
+                    let v: i64 = if long {
+                        arg_i64(ap)
+                    } else {
+                        let v = arg_i32(ap);
+                        match hcount {
+                            0 => v as i64,
+                            1 => v as i16 as i64,
+                            _ => v as i8 as i64,
+                        }
+                    };
+                    emit_int(&mut out, v.unsigned_abs(), v < 0, 10, false, b"", left, zero, width, prec);
+                }
+                b'u' | b'x' | b'X' => {
+                    let v: u64 = if long {
+                        arg_i64(ap) as u64
+                    } else {
+                        let v = arg_i32(ap) as u32;
+                        match hcount {
+                            0 => v as u64,
+                            1 => v as u16 as u64,
+                            _ => v as u8 as u64,
+                        }
+                    };
+                    let (base, upper) = match conv {
+                        b'u' => (10, false),
+                        b'x' => (16, false),
+                        _ => (16, true),
+                    };
+                    emit_int(&mut out, v, false, base, upper, b"", left, zero, width, prec);
+                }
+                b'p' => {
+                    let v = arg_ptr(ap) as usize as u64;
+                    emit_int(&mut out, v, false, 16, false, b"0x", left, zero, width, prec);
+                }
+                b'c' => {
+                    let ch = arg_i32(ap) as u8;
+                    let pad = width.saturating_sub(1);
+                    if !left {
+                        out.pad(b' ', pad);
+                    }
+                    out.put(ch);
+                    if left {
+                        out.pad(b' ', pad);
+                    }
+                }
+                b's' => {
+                    let p = arg_ptr(ap);
+                    let s: *const u8 = if p.is_null() { b"(null)\0".as_ptr() } else { p };
+                    let limit = prec.unwrap_or(usize::MAX);
+                    let mut len = 0usize;
+                    while len < limit && *s.add(len) != 0 {
+                        len += 1;
+                    }
+                    let pad = width.saturating_sub(len);
+                    if !left {
+                        out.pad(b' ', pad);
+                    }
+                    for i in 0..len {
+                        out.put(*s.add(i));
+                    }
+                    if left {
+                        out.pad(b' ', pad);
+                    }
+                }
+                b'%' => out.put(b'%'),
+                _ => {
+                    out.put(b'%');   // unknown conversion: show it as typed
+                    out.put(conv);
+                }
+            }
+        }
+    }
+    out.count
+}
+
+// ---- the public functions: thin wrappers choosing a sink ----
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vsnprintf(buf: *mut u8, n: usize, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
+    let mut written = 0usize;
+    let total = unsafe {
+        format(
+            &mut |b| {
+                if written + 1 < n {
+                    *buf.add(written) = b;
+                }
+                written += 1;
+            },
+            fmt,
+            &mut ap,
+        )
+    };
+    if n > 0 {
+        unsafe { *buf.add(written.min(n - 1)) = 0; }
+    }
+    total
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, mut args: ...) -> i32 {
+    // on older nightlies this may need `args.as_va_list()` instead of `args`
+    unsafe { vsnprintf(buf, n, fmt, args) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn printf(fmt: *const u8, mut args: ...) -> i32 {
+    unsafe { format(&mut |b| serial_write(b), fmt, &mut args) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vfprintf(stream: *mut KFile, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
+    let to_serial = !stream.is_null() && matches!(unsafe { (*stream).kind }, 1 | 2);
+    unsafe {
+        format(
+            &mut |b| {
+                if to_serial {
+                    serial_write(b);
+                }
+            },
+            fmt,
+            &mut ap,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fprintf(stream: *mut KFile, fmt: *const u8, mut args: ...) -> i32 {
+    unsafe { vfprintf(stream, fmt, args) }
 }

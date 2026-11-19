@@ -81,6 +81,8 @@ pub extern "C" fn _start(_boot_info: &'static mut bootloader::BootInfo) -> ! {
     init_timer();
     set_mode_13h();
 
+    unsafe { core::ptr::write_bytes(0xA0000 as *mut u8, 0, 320 * 200); }
+
     static ARG0: [u8; 5] = *b"doom\0";
     let mut argv: [*mut u8; 2] = [ARG0.as_ptr() as *mut u8, core::ptr::null_mut()];
 
