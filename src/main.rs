@@ -102,18 +102,10 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn DG_SetPalette(palette: *const u8) {
-    unsafe{
-        if palette.is_null() {
-            return;
-        }
-
-        for i in 0..256 {
-            let offset = i * 3;
-            let r = core::ptr::read(palette.add(offset));
-            let g = core::ptr::read(palette.add(offset + 1));
-            let b = core::ptr::read(palette.add(offset + 2));
-
-            set_palette_entry(i as u8, i as u8, i as u8, i as u8);
+    unsafe {
+        outb(0x3C8, 0);                       // start at palette index 0
+        for i in 0..768 {
+            outb(0x3C9, *palette.add(i) >> 2);    // 8-bit to the DAC's 6 bits
         }
     }
 }
